@@ -34,11 +34,41 @@
 		#loading-img {
 			width: 100%;
 			height: 100%;
-			object-fit: cover; /* fill screen without stretching */
+			object-fit: cover;
 			position: absolute;
 			top: 0;
 			left: 0;
 		}
+
+		/* Overlay canvas sits above the game canvas */
+		#overlay-canvas {
+			position: absolute;
+			left: 0;
+			top: 0;
+			width: 100%;
+			height: 100%;
+			pointer-events: none; /* overlay does not block clicks */
+			z-index: 10001;
+		}
+
+		/* small control panel */
+		#aim-ui {
+			position: absolute;
+			right: 8px;
+			top: 8px;
+			z-index: 10002;
+			background: rgba(0,0,0,0.5);
+			color: #fff;
+			font-family: system-ui, Arial, sans-serif;
+			padding: 8px;
+			border-radius: 6px;
+			font-size: 13px;
+			backdrop-filter: blur(4px);
+		}
+
+		#aim-ui input[type="range"] { width: 120px; }
+		#aim-ui label { font-size: 12px; display:block; margin-top:6px; }
+		#aim-ui .row { display:flex; align-items:center; gap:6px; margin-top:6px; }
 	</style>
 	<!-- ----------------------------- -->
 
@@ -46,6 +76,7 @@
 	<script type="text/javascript" src="fix-webm-duration.js"></script>
 
 	<script type="text/javascript">
+		// Setup game options (unchanged)
 		window.addEventListener("load", () => {
 			if (document.location.href.startsWith("file:")) {
 				alert("HTTP please, do not open this file locally, run a local HTTP server and load it via HTTP");
@@ -66,17 +97,15 @@
 
 				main();
 
-				// -----------------------------
 				// Animate original loading text
-				// -----------------------------
 				let dots = 0;
 				setInterval(() => {
 					if (typeof window.drawLoadingScreen === "function") {
 						dots = (dots + 1) % 4; // 0..3 dots
 						let dotStr = ".".repeat(dots);
-						window.drawLoadingScreen("Loading" + dotStr); // original text function
+						window.drawLoadingScreen("Loading" + dotStr);
 					}
-				}, 500); // every 500ms
+				}, 500);
 
 				// Keep loading screen visible for 10 seconds, then fade out
 				setTimeout(() => {
@@ -100,6 +129,394 @@
 
 		<!-- Game container -->
 		<div id="game_frame" style="width:100%;height:100%;"></div>
+
+		<!-- Overlay canvas for 3D->2D preview (client-side only) -->
+		<canvas id="overlay-canvas"></canvas>
+
+		<!-- tiny UI to tweak projectile params and toggle auto-read -->
+		<div id="aim-ui">
+			<div><strong>Arrow preview</strong></div>
+			<label><input id="auto-read" type="checkbox" checked> Try auto-read from client</label>
+			<div class="row"><label>Speed</label><input id="speed" type="range" min="0.5" max="5" step="0.1" value="3"><span id="speed-val">3.0</span></div>
+			<div class="row"><label>Gravity</label><input id="gravity" type="range" min="0.01" max="0.2" step="0.01" value="0.05"><span id="gravity-val">0.05</span></div>
+			<div class="row"><label>Drag</label><input id="drag" type="range" min="0.90" max="1.0" step="0.005" value="0.99"><span id="drag-val">0.99</span></div>
+			<button id="toggle-preview" style="margin-top:6px">Hide preview</button>
+			<hr style="margin:6px 0 4px 0;border:none;border-top:1px solid rgba(255,255,255,0.08)">
+			<div style="font-size:12px;opacity:0.85">
+				If auto-read fails, uncheck "Try auto-read" and use manual values below.
+			</div>
+			<div style="margin-top:6px;">
+				<label>Manual px,py,pz</label>
+				<div class="row"><input id="man-x" style="width:60px" placeholder="x"><input id="man-y" style="width:60px" placeholder="y"><input id="man-z" style="width:60px" placeholder="z"></div>
+				<label>Manual yaw (deg), pitch (deg)</label>
+				<div class="row"><input id="man-yaw" style="width:60px" placeholder="yaw"><input id="man-pitch" style="width:60px" placeholder="pitch"></div>
+			</div>
+		</div>
 	</div>
+
+	<script>
+		/*
+		 * Overview:
+		 * - This overlay draws a predicted arrow trajectory using the player's eye position and yaw/pitch.
+		 * - It will attempt to find game/player/camera values at runtime using common variable names
+		 *   (there are many compiled/minified names in classes.js so we try multiple patterns).
+		 * - If it can't auto-read values, you can enter manual values in the UI to test.
+		 *
+		 * Notes on safety & policy:
+		 * - This code only draws a local visual overlay on your client; it doesn't send anything to the server
+		 *   or change server-side gameplay. It's a local preview only.
+		 */
+
+		(function () {
+			const canvas = document.getElementById('overlay-canvas');
+			const ctx = canvas.getContext('2d');
+
+			function resizeCanvas() {
+				const dpr = window.devicePixelRatio || 1;
+				canvas.width = Math.floor(window.innerWidth * dpr);
+				canvas.height = Math.floor(window.innerHeight * dpr);
+				canvas.style.width = window.innerWidth + 'px';
+				canvas.style.height = window.innerHeight + 'px';
+				ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+			}
+			window.addEventListener('resize', resizeCanvas);
+			resizeCanvas();
+
+			// UI references
+			const speedInput = document.getElementById('speed');
+			const gravityInput = document.getElementById('gravity');
+			const dragInput = document.getElementById('drag');
+			const speedVal = document.getElementById('speed-val');
+			const gravityVal = document.getElementById('gravity-val');
+			const dragVal = document.getElementById('drag-val');
+			const autoReadCheckbox = document.getElementById('auto-read');
+			const togglePreviewBtn = document.getElementById('toggle-preview');
+
+			const manX = document.getElementById('man-x');
+			const manY = document.getElementById('man-y');
+			const manZ = document.getElementById('man-z');
+			const manYaw = document.getElementById('man-yaw');
+			const manPitch = document.getElementById('man-pitch');
+
+			let previewVisible = true;
+			togglePreviewBtn.addEventListener('click', () => {
+				previewVisible = !previewVisible;
+				togglePreviewBtn.textContent = previewVisible ? 'Hide preview' : 'Show preview';
+			});
+
+			function updateUI() {
+				speedVal.textContent = Number(speedInput.value).toFixed(2);
+				gravityVal.textContent = Number(gravityInput.value).toFixed(3);
+				dragVal.textContent = Number(dragInput.value).toFixed(3);
+			}
+			speedInput.addEventListener('input', updateUI);
+			gravityInput.addEventListener('input', updateUI);
+			dragInput.addEventListener('input', updateUI);
+			updateUI();
+
+			// Helpers: convert degrees to radians
+			function degToRad(d) { return d * Math.PI / 180; }
+
+			// Attempt to read the player's position & rotation from the in-page game.
+			// We try several likely names found in compiled classes.js; if none match, we fall back to UI manual values.
+			function readPlayerFromGame() {
+				// We will attempt several strategies. Because the compiled code uses short names,
+				// we try to detect the common "getMinecraft" / "getRenderViewEntity" accessors, or a global "player".
+				try {
+					// Strategy A: if a "getMinecraft" function exists on any global object A-like (scanned)
+					// Note: classes.js contains getMinecraft/getRenderViewEntity methods (see uploaded file). :contentReference[oaicite:1]{index=1}
+					const candidates = [window, window.A, window.a, window.minecraft, window.Minecraft, window.Eaglercraft, window.EaglercraftX];
+					for (const c of candidates) {
+						if (!c) continue;
+						// try getMinecraft
+						if (typeof c.getMinecraft === 'function') {
+							try {
+								const mc = c.getMinecraft();
+								// many clients expose a render/view entity getter
+								if (mc && typeof mc.getRenderViewEntity === 'function') {
+									const e = mc.getRenderViewEntity();
+									if (e) {
+										// attempt to read common field names - compiled names vary
+										const px = e.h ?? e.posX ?? e.x ?? e.xPos ?? e.a ?? null;
+										const py = e.k ?? e.posY ?? e.y ?? e.yPos ?? e.b ?? null;
+										const pz = e.i ?? e.posZ ?? e.z ?? e.zPos ?? e.c ?? null;
+										// yaw/pitch might be stored as t (yaw) and y (pitch) in this client
+										const yaw = e.t ?? e.rotationYaw ?? e.yaw ?? null;
+										const pitch = e.y ?? e.rotationPitch ?? e.pitch ?? null;
+										if (px != null && py != null && pz != null && yaw != null && pitch != null) {
+											return {
+												px: Number(px),
+												py: Number(py),
+												pz: Number(pz),
+												yaw: Number(yaw),
+												pitch: Number(pitch)
+											};
+										}
+										// fallback: some entities store position as .h,.k,.i and motion as .e,.c,.f
+										if (e.h != null && e.k != null && e.i != null) {
+											return {
+												px: Number(e.h),
+												py: Number(e.k),
+												pz: Number(e.i),
+												yaw: Number(e.t || 0),
+												pitch: Number(e.y || 0)
+											};
+										}
+									}
+								}
+							} catch (err) {
+								// ignore and try next candidate
+							}
+						}
+
+						// Strategy B: many clients expose a "player" or "renderViewEntity" global
+						if (c.player) {
+							const p = c.player;
+							if (p) {
+								const px = p.posX ?? p.x ?? p.h ?? null;
+								const py = p.posY ?? p.y ?? p.k ?? null;
+								const pz = p.posZ ?? p.z ?? p.i ?? null;
+								const yaw = p.rotationYaw ?? p.t ?? p.yaw ?? null;
+								const pitch = p.rotationPitch ?? p.y ?? p.pitch ?? null;
+								if (px != null && py != null && pz != null && yaw != null && pitch != null) {
+									return { px: Number(px), py: Number(py), pz: Number(pz), yaw: Number(yaw), pitch: Number(pitch) };
+								}
+							}
+						}
+
+						// Strategy C: try mc global object shapes
+						if (c.getRenderViewEntity && typeof c.getRenderViewEntity === 'function') {
+							try {
+								const e = c.getRenderViewEntity();
+								if (e && e.h != null && e.k != null && e.i != null) {
+									return { px: Number(e.h), py: Number(e.k), pz: Number(e.i), yaw: Number(e.t || 0), pitch: Number(e.y || 0) };
+								}
+							} catch (e) {}
+						}
+					}
+
+					// Strategy D: a conservative generic scan of top-level objects for common properties
+					for (const key of Object.keys(window)) {
+						try {
+							const obj = window[key];
+							if (!obj || typeof obj !== 'object') continue;
+							// look for objects that look like "player" or "render entity"
+							if (('h' in obj && 'k' in obj && 'i' in obj) || ('posX' in obj && 'posY' in obj && 'posZ' in obj)) {
+								const px = obj.h ?? obj.posX ?? obj.x ?? null;
+								const py = obj.k ?? obj.posY ?? obj.y ?? null;
+								const pz = obj.i ?? obj.posZ ?? obj.z ?? null;
+								const yaw = obj.t ?? obj.rotationYaw ?? obj.yaw ?? 0;
+								const pitch = obj.y ?? obj.rotationPitch ?? obj.pitch ?? 0;
+								if (px != null && py != null && pz != null) {
+									return { px: Number(px), py: Number(py), pz: Number(pz), yaw: Number(yaw), pitch: Number(pitch) };
+								}
+							}
+						} catch (e) { /* ignore */ }
+					}
+				} catch (e) {
+					// any failure reading client shouldn't break the overlay
+				}
+				// no auto read found
+				return null;
+			}
+
+			// 3D -> 2D projection using camera yaw & pitch and screen size.
+			// This is a simple view-space projection: convert a world-space point into the player's camera space
+			// and then to screen coordinates using a basic perspective formula.
+			function projectPointToScreen(point, camera, fovDegrees, screenW, screenH) {
+				// camera: { px, py, pz, yaw(deg), pitch(deg) }
+				// point: { x, y, z }
+				const yaw = degToRad(camera.yaw);
+				const pitch = degToRad(camera.pitch);
+
+				// Build forward & right & up vectors from yaw/pitch (Minecraft conventions)
+				const cy = Math.cos(yaw);
+				const sy = Math.sin(yaw);
+				const cp = Math.cos(pitch);
+				const sp = Math.sin(pitch);
+
+				// Forward vector (where camera is looking)
+				const fx = -Math.sin(yaw) * Math.cos(pitch);
+				const fy = Math.sin(pitch);
+				const fz = Math.cos(yaw) * Math.cos(pitch);
+
+				// Right vector (perpendicular)
+				const rx = Math.cos(yaw);
+				const ry = 0;
+				const rz = Math.sin(yaw) * -1;
+
+				// Up vector = right x forward
+				const ux = ry * fz - rz * fy;
+				const uy = rz * fx - rx * fz;
+				const uz = rx * fy - ry * fx;
+
+				// Translate world point into camera space
+				const vx = point.x - camera.px;
+				const vy = point.y - camera.py;
+				const vz = point.z - camera.pz;
+
+				// Coordinates in camera space (dot with basis vectors)
+				const cx_cam = vx * rx + vy * ry + vz * rz; // right
+				const cy_cam = vx * ux + vy * uy + vz * uz; // up
+				const cz_cam = vx * fx + vy * fy + vz * fz; // forward
+
+				// If point is behind camera, return null
+				if (cz_cam <= 0.001) return null;
+
+				// Perspective projection
+				const fov = fovDegrees;
+				// vertical FOV approximation: use fovDegrees provided
+				const aspect = screenW / screenH;
+				const f = 1 / Math.tan((fov * Math.PI / 180) / 2);
+
+				// projected NDC coords
+				const ndcX = (cx_cam * f / cz_cam) / aspect;
+				const ndcY = (cy_cam * f / cz_cam);
+
+				// screen coords
+				const sx = (screenW / 2) * (1 + ndcX);
+				const sy = (screenH / 2) * (1 - ndcY);
+
+				return { x: sx, y: sy, depth: cz_cam };
+			}
+
+			// Simulate arrow trajectory (tick-based numeric sim)
+			function simulateProjectile(startPos, directionVec, speed, gravity, drag, maxSteps = 200) {
+				// directionVec should be unit length
+				let pos = { x: startPos.x, y: startPos.y, z: startPos.z };
+				let vel = { x: directionVec.x * speed, y: directionVec.y * speed, z: directionVec.z * speed };
+				const points = [];
+				const dt = 1 / 20; // simulate at 20 ticks per second for clarity (Minecraft uses ticks)
+				for (let i = 0; i < maxSteps; i++) {
+					// record
+					points.push({ x: pos.x, y: pos.y, z: pos.z });
+
+					// integrate velocity -> position
+					pos.x += vel.x * dt;
+					pos.y += vel.y * dt;
+					pos.z += vel.z * dt;
+
+					// apply drag
+					vel.x *= Math.pow(drag, dt * 20);
+					vel.z *= Math.pow(drag, dt * 20);
+
+					// gravity
+					vel.y -= gravity * dt;
+
+					// stop if below some threshold (hit ground) - here we just stop if y < 0 or plunger into ground
+					if (pos.y < -10) break;
+				}
+				return points;
+			}
+
+			// Compute unit direction vector from yaw/pitch (Minecraft-style)
+			function directionFromYawPitch(yawDeg, pitchDeg) {
+				const yaw = degToRad(yawDeg);
+				const pitch = degToRad(pitchDeg);
+				const x = -Math.sin(yaw) * Math.cos(pitch);
+				const y = Math.sin(pitch);
+				const z = Math.cos(yaw) * Math.cos(pitch);
+				// normalize
+				const len = Math.hypot(x, y, z) || 1;
+				return { x: x / len, y: y / len, z: z / len };
+			}
+
+			// Convert player's position to eye position (typical Minecraft eye offset)
+			function eyePositionFromPlayer(px, py, pz) {
+				// default eye height ~1.62 for player standing (in 1.8.9 it's ~1.62)
+				return { x: px, y: py + 1.62, z: pz };
+			}
+
+			// Main draw loop
+			let lastTime = performance.now();
+			function drawLoop() {
+				const w = window.innerWidth;
+				const h = window.innerHeight;
+				ctx.clearRect(0, 0, w, h);
+				if (!previewVisible) {
+					requestAnimationFrame(drawLoop);
+					return;
+				}
+
+				// read config
+				const speed = Number(speedInput.value);
+				const gravity = Number(gravityInput.value);
+				const drag = Number(dragInput.value);
+				const fov = 70; // approximate Minecraft FOV (you can change / expose if needed)
+
+				// try to auto-read
+				let playerData = null;
+				if (autoReadCheckbox.checked) {
+					playerData = readPlayerFromGame();
+				}
+				// fallback to manual if provided
+				if (!playerData) {
+					const mx = parseFloat(manX.value);
+					const my = parseFloat(manY.value);
+					const mz = parseFloat(manZ.value);
+					const myaw = parseFloat(manYaw.value);
+					const mpitch = parseFloat(manPitch.value);
+					if (!isNaN(mx) && !isNaN(my) && !isNaN(mz) && !isNaN(myaw) && !isNaN(mpitch)) {
+						playerData = { px: mx, py: my, pz: mz, yaw: myaw, pitch: mpitch };
+					}
+				}
+
+				if (playerData) {
+					// compute eye pos and direction
+					const eye = eyePositionFromPlayer(playerData.px, playerData.py, playerData.pz);
+					const dir = directionFromYawPitch(playerData.yaw, playerData.pitch);
+
+					// simulate projectile
+					const pts = simulateProjectile(eye, dir, speed, gravity, drag, 400);
+
+					// project each point and draw
+					ctx.lineWidth = 2;
+					ctx.strokeStyle = 'rgba(0,255,160,0.9)';
+					ctx.beginPath();
+					let first = true;
+					let landing2D = null;
+					for (let i = 0; i < pts.length; i++) {
+						const p = pts[i];
+						const projected = projectPointToScreen({x: p.x, y: p.y, z: p.z},
+							{ px: playerData.px, py: playerData.py + 1.62, pz: playerData.pz, yaw: playerData.yaw, pitch: playerData.pitch },
+							fov, w, h);
+						if (!projected) continue;
+						if (first) {
+							ctx.moveTo(projected.x, projected.y);
+							first = false;
+						} else {
+							ctx.lineTo(projected.x, projected.y);
+						}
+						landing2D = projected;
+					}
+					ctx.stroke();
+
+					// draw landing marker
+					if (landing2D) {
+						ctx.beginPath();
+						ctx.fillStyle = 'rgba(255,80,80,0.95)';
+						ctx.arc(landing2D.x, landing2D.y, 6, 0, 2 * Math.PI);
+						ctx.fill();
+
+						// depth tooltip
+						ctx.fillStyle = 'rgba(255,255,255,0.9)';
+						ctx.font = '12px system-ui, Arial';
+						const depthText = 'depth: ' + (landing2D.depth ? landing2D.depth.toFixed(1) : '—');
+						ctx.fillText(depthText, Math.max(6, landing2D.x + 8), Math.max(12, landing2D.y - 8));
+					}
+				} else {
+					// show hint text
+					ctx.fillStyle = 'rgba(255,255,255,0.8)';
+					ctx.font = '14px system-ui, Arial';
+					ctx.fillText('Auto-read failed. Uncheck "Try auto-read" and enter manual px,py,pz and yaw,pitch to test.', 12, 24);
+				}
+
+				requestAnimationFrame(drawLoop);
+			}
+
+			// Start the loop
+			requestAnimationFrame(drawLoop);
+		})();
+	</script>
 </body>
 </html>
