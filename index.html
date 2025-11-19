@@ -24,73 +24,23 @@
 			left: 0;
 			width: 100%;
 			height: 100%;
-			background-color: #000;
+			background-color: #000; /* fallback if image fails */
 			z-index: 9999;
 			opacity: 1;
 			transition: opacity 1s;
 		}
 
+		/* Make the loading image cover the entire screen */
 		#loading-img {
 			width: 100%;
 			height: 100%;
-			object-fit: cover;
+			object-fit: cover; /* fill screen without stretching */
 			position: absolute;
 			top: 0;
 			left: 0;
 		}
-
-		/* Trajectory Sandbox Button */
-		#traj-toggle {
-			position:absolute;
-			top:10px;
-			left:10px;
-			z-index:99999;
-			background:#0c1a2f;
-			color:white;
-			padding:8px 12px;
-			border-radius:6px;
-			cursor:pointer;
-			font-family:Arial, sans-serif;
-			font-size:14px;
-			border:1px solid #1e4a7a;
-			user-select:none;
-		}
-
-		/* Trajectory Sandbox Panel */
-		#traj-panel {
-			position:absolute;
-			top:50px;
-			left:10px;
-			width:320px;
-			height:380px;
-			background:rgba(0,0,0,0.7);
-			border:1px solid #1e4a7a;
-			border-radius:8px;
-			z-index:99999;
-			display:none;
-			padding:10px;
-			color:white;
-			font-family:Arial, sans-serif;
-		}
-
-		#traj-canvas {
-			width:100%;
-			height:240px;
-			background:#0b1220;
-			border:1px solid #1e4a7a;
-			border-radius:4px;
-		}
-
-		label {
-			font-size:13px;
-			margin-top:8px;
-			display:block;
-		}
-
-		input[type=range] {
-			width:100%;
-		}
 	</style>
+	<!-- ----------------------------- -->
 
 	<script type="text/javascript" src="classes.js"></script>
 	<script type="text/javascript" src="fix-webm-duration.js"></script>
@@ -116,14 +66,19 @@
 
 				main();
 
+				// -----------------------------
+				// Animate original loading text
+				// -----------------------------
 				let dots = 0;
 				setInterval(() => {
 					if (typeof window.drawLoadingScreen === "function") {
-						dots = (dots + 1) % 4;
-						window.drawLoadingScreen("Loading" + ".".repeat(dots));
+						dots = (dots + 1) % 4; // 0..3 dots
+						let dotStr = ".".repeat(dots);
+						window.drawLoadingScreen("Loading" + dotStr); // original text function
 					}
-				}, 500);
+				}, 500); // every 500ms
 
+				// Keep loading screen visible for 10 seconds, then fade out
 				setTimeout(() => {
 					const ld = document.getElementById("custom-loading");
 					if (ld) {
@@ -137,97 +92,14 @@
 </head>
 
 <body style="margin:0;width:100vw;height:100vh;overflow:hidden;">
-
-	<!-- Floating Trajectory Demo Button -->
-	<div id="traj-toggle">Trajectory Demo</div>
-
-	<!-- Trajectory Sandbox Panel -->
-	<div id="traj-panel">
-		<canvas id="traj-canvas"></canvas>
-
-		<label>Yaw: <span id="yawVal">0</span></label>
-		<input type="range" id="yaw" min="-180" max="180" value="0">
-
-		<label>Pitch: <span id="pitchVal">0</span></label>
-		<input type="range" id="pitch" min="-89" max="89" value="0">
-
-		<label>Speed: <span id="speedVal">30</span></label>
-		<input type="range" id="speed" min="1" max="80" value="30">
-	</div>
-
-	<!-- GAME WRAPPER -->
 	<div id="game-wrapper" style="position:relative;width:100%;height:100%;">
+		<!-- Fullscreen background image -->
 		<div id="custom-loading">
 			<img src="loading.png" id="loading-img">
 		</div>
+
+		<!-- Game container -->
 		<div id="game_frame" style="width:100%;height:100%;"></div>
 	</div>
-
-	<!-- Sandbox Script -->
-	<script>
-		const panel = document.getElementById("traj-panel");
-		const toggle = document.getElementById("traj-toggle");
-		const canvas = document.getElementById("traj-canvas");
-		const ctx = canvas.getContext("2d");
-
-		function resizeCanvas() {
-			canvas.width = canvas.clientWidth;
-			canvas.height = canvas.clientHeight;
-		}
-
-		resizeCanvas();
-		window.addEventListener("resize", resizeCanvas);
-
-		toggle.onclick = () => {
-			panel.style.display = panel.style.display === "none" ? "block" : "none";
-		};
-
-		const yawEl = document.getElementById("yaw");
-		const pitchEl = document.getElementById("pitch");
-		const speedEl = document.getElementById("speed");
-		const yawVal = document.getElementById("yawVal");
-		const pitchVal = document.getElementById("pitchVal");
-		const speedVal = document.getElementById("speedVal");
-
-		function deg(a){ return a * Math.PI / 180; }
-
-		function draw() {
-			ctx.clearRect(0,0,canvas.width,canvas.height);
-
-			const yaw = deg(Number(yawEl.value));
-			const pitch = deg(Number(pitchEl.value));
-			const speed = Number(speedEl.value);
-
-			yawVal.textContent = yawEl.value;
-			pitchVal.textContent = pitchEl.value;
-			speedVal.textContent = speedEl.value;
-
-			let vx = Math.sin(yaw) * Math.cos(pitch) * speed;
-			let vy = -Math.sin(pitch) * speed;
-			let vz = Math.cos(yaw) * Math.cos(pitch) * speed;
-
-			let x=0, y=canvas.height/2, z=0;
-
-			ctx.beginPath();
-			ctx.strokeStyle = "#39f";
-			ctx.lineWidth = 2;
-
-			for (let t=0; t<100; t+=1) {
-				let px = canvas.width/2 + t * (vx*0.05);
-				let py = canvas.height/2 - t * (vy*0.05) + (0.5 * 9.8 * (t*0.05)**2);
-
-				if (t===0) ctx.moveTo(px,py);
-				else ctx.lineTo(px,py);
-			}
-
-			ctx.stroke();
-		}
-
-		yawEl.oninput = draw;
-		pitchEl.oninput = draw;
-		speedEl.oninput = draw;
-
-		draw();
-	</script>
 </body>
 </html>
